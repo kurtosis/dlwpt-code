@@ -1,3 +1,5 @@
 .DS_Store
 tools
 *_old
+*.zip
+data/part2/luna/ct/
