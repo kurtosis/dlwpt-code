@@ -16,6 +16,7 @@ h5py
 jupyter
 matplotlib
 numpy<=1.19.4
+pandas
 Pillow
 scikit-image>=0.15.0
 scipy
