@@ -14,6 +14,7 @@ import torch
 from torch.utils.data import Dataset
 
 log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
 raw_cache = getCache("part2_dsets")
 
 
@@ -130,9 +131,10 @@ def get_ct_raw_candidate(series_uid, center_xyz, width_irc):
 
 class LunaDataset(Dataset):
     def __init__(
-        self, val_stride=0, is_val_set_bool=None, series_uid=None,
+        self, val_stride=0, is_val_set_bool=None, ratio_int=0, series_uid=None,
     ):
         self.candidates = copy.copy(get_candidate_df())
+        self.ratio_int = ratio_int
 
         if series_uid:
             self.candidates = self.candidates[self.candidates.seriesuid == series_uid]
@@ -140,18 +142,14 @@ class LunaDataset(Dataset):
         if is_val_set_bool:
             assert val_stride > 0, val_stride
             self.candidates = self.candidates[::val_stride]
-            assert self.candidates
+            # assert self.candidates
         elif val_stride > 0:
             self.candidates = self.candidates[self.candidates.index % val_stride != 0]
             self.candidates.reset_index(inplace=True, drop=True)
-            assert self.candidates
+            # assert self.candidates
 
         log.info(
-            "{!r}: {} {} samples".format(
-                self,
-                len(self.candidates),
-                "validation" if is_val_set_bool else "training",
-            )
+            f"{self}: {len(self.candidates)} {'validation' if is_val_set_bool else 'training'} samples"
         )
 
     def __len__(self):
@@ -258,6 +256,5 @@ def show_candidate(series_uid, batch_ndx=None, **kwargs):
             for label in subplot.get_xticklabels() + subplot.get_yticklabels():
                 label.set_fontsize(20)
             plt.imshow(ct_a[index], clim=clim, cmap="gray")
-
 
     print(series_uid, batch_ndx, bool(pos_t[0]), pos_list)
