@@ -1,6 +1,9 @@
 import copy
 import functools
 import glob
+import math
+import random
+
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -11,6 +14,7 @@ from util.logconf import logging
 from util.util import XyzTuple, xyz2irc
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 log = logging.getLogger(__name__)
@@ -79,7 +83,10 @@ class Ct:
 
     def get_raw_candidate(self, center_xyz, width_irc):
         center_irc = xyz2irc(
-            center_xyz, self.origin_xyz, self.vx_size_xyz, self.direction_a,
+            center_xyz,
+            self.origin_xyz,
+            self.vx_size_xyz,
+            self.direction_a,
         )
 
         slice_list = []
@@ -129,34 +136,126 @@ def get_ct_raw_candidate(series_uid, center_xyz, width_irc):
     return ct_chunk, center_irc
 
 
+def get_ct_augmented_candidate(
+    augmentation_dict, series_uid, center_xyz, width_irc, use_cache=True
+):
+    if use_cache:
+        ct_chunk, center_irc = get_ct_raw_candidate(series_uid, center_xyz, width_irc)
+    else:
+        ct = get_ct(series_uid)
+        ct_chunk, center_irc = ct.get_raw_candidate(center_xyz, width_irc)
+    ct_t = torch.tensor(ct_chunk).unsqueeze(0).unsqueeze(0).to(torch.float32)
+    transform_t = torch.eye(4)
+    for i in range(3):
+        if "flip" in augmentation_dict:
+            if random.random() > 0.5:
+                transform_t[i, i] *= -1
+        if "offset" in augmentation_dict:
+            offset_float = augmentation_dict["offset"]
+            random_float = random.random() * 2 - 1
+            transform_t[i, 3] = offset_float * random_float
+        if "scale" in augmentation_dict:
+            scale_float = augmentation_dict["scale"]
+            random_float = random.random() * 2 - 1
+            transform_t[i, i] *= 1.0 + scale_float + random_float
+    if "rotate" in augmentation_dict:
+        angle_rad = random.random() * math.pi * 2
+        s = math.sin(angle_rad)
+        c = math.cos(angle_rad)
+        rotation_t = torch.tensor(
+            [
+                [c, -s, 0, 0],
+                [s, c, 0, 0],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1],
+            ]
+        )
+        transform_t @= rotation_t
+    affine_t = F.affine_grid(
+        transform_t[:3].unsqueeze(0).to(torch.float32), ct_t.size(), align_corners=False
+    )
+    augmented_chunk = F.grid_sample(
+        ct_t,
+        affine_t,
+        padding_mode="border",
+        align_corners=False,
+    ).to("cpu")
+    if "noise" in augmentation_dict:
+        noise_t = torch.randn_like(augmented_chunk)
+        noise_t *= augmentation_dict["noise"]
+        augmented_chunk += noise_t
+
+    return augmented_chunk[0], center_irc
+
+
 class LunaDataset(Dataset):
     def __init__(
-        self, val_stride=0, is_val_set_bool=None, ratio_int=0, series_uid=None,
+        self,
+        val_stride=0,
+        is_val_set_bool=None,
+        ratio_int=0,
+        augmentation_dict=None,
+        series_uid=None,
+        sortby_str="random",
     ):
-        self.candidates = copy.copy(get_candidate_df())
         self.ratio_int = ratio_int
+        self.augmentation_dict = augmentation_dict
+        self.candidates = copy.copy(get_candidate_df())
+        self.use_cache = True
 
         if series_uid:
             self.candidates = self.candidates[self.candidates.seriesuid == series_uid]
-
-        if is_val_set_bool:
+        elif is_val_set_bool:
             assert val_stride > 0, val_stride
             self.candidates = self.candidates[::val_stride]
-            # assert self.candidates
+            assert not self.candidates.empty
         elif val_stride > 0:
             self.candidates = self.candidates[self.candidates.index % val_stride != 0]
-            self.candidates.reset_index(inplace=True, drop=True)
-            # assert self.candidates
+            assert not self.candidates.empty
+        self.candidates.reset_index(inplace=True, drop=True)
+
+        if sortby_str == "random":
+            self.candidates = self.candidates.sample(frac=1).reset_index(drop=True)
+        elif sortby_str == "label_and_size":
+            pass
+        else:
+            raise Exception("Unknown sort: " + repr(sortby_str))
+
+        self.neg_df = copy.copy(
+            self.candidates[self.candidates.is_nodule_bool == False]
+        )
+        self.neg_df.reset_index(drop=True, inplace=True)
+        self.pos_df = copy.copy(self.candidates[self.candidates.is_nodule_bool == True])
+        self.pos_df.reset_index(drop=True, inplace=True)
 
         log.info(
-            f"{self}: {len(self.candidates)} {'validation' if is_val_set_bool else 'training'} samples"
+            f"{self!r}: {len(self.candidates)} {'validation' if is_val_set_bool else 'training'} samples"
         )
 
+    def shuffle_samples(self):
+        if self.ratio_int:
+            self.neg_df = self.neg_df.sample(frac=1).reset_index(drop=True)
+            self.pos_df = self.pos_df.sample(frac=1).reset_index(drop=True)
+
     def __len__(self):
-        return len(self.candidates)
+        if self.ratio_int:
+            return 20000
+        else:
+            return len(self.candidates)
 
     def __getitem__(self, ndx):
-        candidate_series = self.candidates.iloc[ndx]
+        if self.ratio_int:
+            pos_ndx = ndx // (self.ratio_int + 1)
+            if ndx % (self.ratio_int + 1):
+                neg_ndx = ndx - 1 - pos_ndx
+                neg_ndx %= len(self.neg_df)
+                candidate_series = self.neg_df.iloc[neg_ndx]
+            else:
+                pos_ndx %= len(self.pos_df)
+                candidate_series = self.pos_df.iloc[pos_ndx]
+        else:
+            candidate_series = self.candidates.iloc[ndx]
+
         width_irc = (32, 48, 48)
 
         candidate_a, center_irc = get_ct_raw_candidate(

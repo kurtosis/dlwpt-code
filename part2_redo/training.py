@@ -1,6 +1,8 @@
 import argparse
 import datetime
 import os
+
+
 import logging
 import numpy as np
 import sys
@@ -12,9 +14,11 @@ import torch
 import torch.cuda
 from torch.utils.data import DataLoader
 from torch.optim import SGD, Adam
-from .dsets import LunaDataset
-from .model import LunaModel
-from .util import enumerate_with_estimate
+from part2_redo.dsets import LunaDataset
+from part2_redo.model import LunaModel
+from part2_redo.my_utils import enumerate_with_estimate
+
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
@@ -37,11 +41,60 @@ class LunaTrainingApp:
             type=int,
         )
         parser.add_argument(
-            "--batch-size", help="Batch size to use for training", default=32, type=int,
+            "--batch-size",
+            help="Batch size to use for training",
+            default=32,
+            type=int,
         )
         parser.add_argument(
-            "--epochs", help="Number of epochs to train for", default=1, type=int,
+            "--epochs",
+            help="Number of epochs to train for",
+            default=1,
+            type=int,
         )
+        parser.add_argument(
+            "--balanced",
+            help="Balance the training data to 50/50 pos/neg.",
+            action="store_true",
+            default=True,
+        )
+        parser.add_argument(
+            "--augmented",
+            help="Augment the training data",
+            action="store_true",
+            default=False,
+        )
+        parser.add_argument(
+            "--augment-flip",
+            help="Augment the training data with random flip",
+            action="store_true",
+            default=False,
+        )
+        parser.add_argument(
+            "--augment-offset",
+            help="Augment the training data by randomly offsetting the data slightly along the X and Y axes.",
+            action="store_true",
+            default=False,
+        )
+        parser.add_argument(
+            "--augment-scale",
+            help="Augment the training data by randomly increasing or decreasing the size of the candidate.",
+            action="store_true",
+            default=False,
+        )
+        parser.add_argument(
+            "--augment-rotate",
+            help="Augment the training data by randomly rotating the data around the head-foot axis.",
+            action="store_true",
+            default=False,
+        )
+        parser.add_argument(
+            "--augment-noise",
+            help="Augment the training data by randomly adding noise to the data.",
+            action="store_true",
+            default=False,
+        )
+
         parser.add_argument(
             "--tb-prefix",
             default="part2_redo",
@@ -66,8 +119,17 @@ class LunaTrainingApp:
         self.trn_writer = None
         self.val_writer = None
         self.total_training_samples_count = 0
-        # self.lr = lr
-        # self.momentum = momentum
+        self.augmentation_dict = {}
+        if self.cli_args.augmented or self.cli_args.augment_flip:
+            self.augmentation_dict["flip"] = True
+        if self.cli_args.augmented or self.cli_args.augment_offset:
+            self.augmentation_dict["offset"] = 0.1
+        if self.cli_args.augmented or self.cli_args.augment_scale:
+            self.augmentation_dict["scale"] = 0.2
+        if self.cli_args.augmented or self.cli_args.augment_rotate:
+            self.augmentation_dict["rotate"] = True
+        if self.cli_args.augmented or self.cli_args.augment_noise:
+            self.augmentation_dict["flip"] = 25.0
 
     def init_model(self):
         model = LunaModel()
@@ -85,7 +147,14 @@ class LunaTrainingApp:
         return SGD(self.model.parameters(), lr=0.0001, momentum=0.99)
 
     def init_dl(self, val=False):
-        ds = LunaDataset(val_stride=10, is_val_set_bool=val)
+        if val:
+            ds = LunaDataset(val_stride=10, is_val_set_bool=val)
+        else:
+            ds = LunaDataset(
+                val_stride=10,
+                is_val_set_bool=val,
+                ratio_int=int(self.cli_args.balanced),
+            )
         batch_size = self.cli_args.batch_size
         if self.use_cuda:
             batch_size *= torch.cuda.device_count()
@@ -109,6 +178,7 @@ class LunaTrainingApp:
 
     def do_training(self, epoch_ndx, train_dl):
         self.model.train()
+        train_dl.dataset.shuffle_samples()
         trn_metrics_g = torch.zeros(
             METRICS_SIZE, len(train_dl.dataset), device=self.device
         )
@@ -122,8 +192,6 @@ class LunaTrainingApp:
             )
             loss_var.backward()
             self.optimizer.step()
-            # if batch_ndx % 10 == 0:
-            #     self.log_metrics(batch_ndx, "trn", trn_metrics_t)
         self.total_training_samples_count += len(train_dl.dataset)
         return trn_metrics_g.to("cpu")
 
@@ -131,7 +199,9 @@ class LunaTrainingApp:
         with torch.no_grad():
             self.model.eval()
             val_metrics_g = torch.zeros(
-                METRICS_SIZE, len(val_dl.dataset), device=self.device,
+                METRICS_SIZE,
+                len(val_dl.dataset),
+                device=self.device,
             )
             batch_iter = enumerate_with_estimate(
                 val_dl, f"E{epoch_ndx} Validation", start_ndx=val_dl.num_workers
@@ -147,10 +217,17 @@ class LunaTrainingApp:
         train_dl = self.init_dl()
         val_dl = self.init_dl(val=True)
         for epoch_ndx in range(1, self.cli_args.epochs + 1):
+            log.info(
+                f"Epoch {epoch_ndx} of {self.cli_args.epochs}, {len(train_dl)} trn, {len(val_dl)} "
+                f"val batches of size {self.cli_args.batch_size}*{(torch.cuda.device_count() if self.use_cuda else 1)}"
+            )
             trn_metrics_t = self.do_training(epoch_ndx, train_dl)
             self.log_metrics(epoch_ndx, "trn", trn_metrics_t)
             val_metrics_t = self.do_validation(epoch_ndx, val_dl)
             self.log_metrics(epoch_ndx, "val", val_metrics_t)
+        if hasattr(self, "trn_writer"):
+            self.trn_writer.close()
+            self.val_writer.close()
 
     def compute_batch_loss(self, batch_ndx, batch_tup, batch_size, metrics_g):
         input_t, label_t, series_list, _center_list = batch_tup
@@ -184,10 +261,10 @@ class LunaTrainingApp:
             "loss/neg": metrics_t[METRICS_LOSS_NDX, neg_label_mask].mean(),
             "loss/pos": metrics_t[METRICS_LOSS_NDX, pos_label_mask].mean(),
             "correct/all": (
-                (pos_correct + neg_correct) / np.float(metrics_t.shape[1]) * 100
+                (pos_correct + neg_correct) / np.float32(metrics_t.shape[1]) * 100
             ),
-            "correct/neg": neg_correct / np.float(neg_count) * 100,
-            "correct/pos": pos_correct / np.float(pos_count) * 100,
+            "correct/neg": neg_correct / np.float32(neg_count) * 100,
+            "correct/pos": pos_correct / np.float32(pos_count) * 100,
             "pr/precision": pos_correct / np.float32(pos_correct + pos_incorrect),
             "pr/recall": pos_correct / np.float32(pos_correct + neg_incorrect),
         }
@@ -198,16 +275,16 @@ class LunaTrainingApp:
         )
 
         log.info(
-            f"E{epoch_ndx} {mode_str} {metrics_dict['loss/all']} loss, {metrics_dict['correct/all']}% correct"
+            f"E{epoch_ndx} {mode_str} {metrics_dict['loss/all']:.4f} loss, {metrics_dict['correct/all']:-5.1f}% correct"
         )
         log.info(
-            f"E{epoch_ndx} {mode_str} {metrics_dict['pr/precision']} precision, {metrics_dict['pr/recall']} recall, {metrics_dict['pr/f1_score']} f1 score"
+            f"E{epoch_ndx} {mode_str} {metrics_dict['pr/precision']:.4f} precision, {metrics_dict['pr/recall']:.4f} recall, {metrics_dict['pr/f1_score']:.4f} f1 score"
         )
         log.info(
-            f"E{epoch_ndx} {mode_str}_neg {metrics_dict['loss/neg']} loss, {metrics_dict['correct/neg']}% correct ({neg_correct} of {neg_count}"
+            f"E{epoch_ndx} {mode_str}_neg {metrics_dict['loss/neg']:.4f} loss, {metrics_dict['correct/neg']:-5.1f}% correct ({neg_correct} of {neg_count}"
         )
         log.info(
-            f"E{epoch_ndx} {mode_str}_pos {metrics_dict['loss/pos']} loss, {metrics_dict['correct/pos']}% correct ({pos_correct} of {pos_count}"
+            f"E{epoch_ndx} {mode_str}_pos {metrics_dict['loss/pos']:.4f} loss, {metrics_dict['correct/pos']:-5.1f}% correct ({pos_correct} of {pos_count}"
         )
         writer = getattr(self, mode_str + "_writer")
         for k, v in metrics_dict.items():
@@ -218,6 +295,24 @@ class LunaTrainingApp:
             metrics_t[METRICS_PRED_NDX],
             self.total_training_samples_count,
         )
+
+        bins = [x / 50.0 for x in range(51)]
+        neg_hist_mask = neg_label_mask & (metrics_t[METRICS_PRED_NDX] > 0.01)
+        pos_hist_mask = pos_label_mask & (metrics_t[METRICS_PRED_NDX] < 0.99)
+        if neg_hist_mask.any():
+            writer.add_histogram(
+                "is_neg",
+                metrics_t[METRICS_PRED_NDX, neg_hist_mask],
+                self.total_training_samples_count,
+                bins=bins,
+            )
+        if pos_hist_mask.any():
+            writer.add_histogram(
+                "is_pos",
+                metrics_t[METRICS_PRED_NDX, pos_hist_mask],
+                self.total_training_samples_count,
+                bins=bins,
+            )
 
 
 if __name__ == "__main__":

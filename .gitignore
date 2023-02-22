@@ -3,3 +3,9 @@ tools
 *_old
 *.zip
 data/part2/luna/ct/
+__pycache__
+data-unversioned/
+runs/
+.ipynb_checkpoints/
+.mypy_cache/
+.idea
