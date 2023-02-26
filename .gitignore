@@ -4,8 +4,9 @@ tools
 *.zip
 data/part2/luna/ct/
 __pycache__
+part2_redo/__pycache__
 data-unversioned/
 runs/
 .ipynb_checkpoints/
 .mypy_cache/
-.idea
+.idea/
