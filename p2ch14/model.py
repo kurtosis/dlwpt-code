@@ -38,7 +38,8 @@ def augment3d(inp):
         transform_t @= rotation_t
     #print(inp.shape, transform_t[:3].unsqueeze(0).expand(inp.size(0), -1, -1).shape)
     affine_t = torch.nn.functional.affine_grid(
-            transform_t[:3].unsqueeze(0).expand(inp.size(0), -1, -1).cuda(),
+            transform_t[:3].unsqueeze(0).expand(inp.size(0), -1, -1),
+            # transform_t[:3].unsqueeze(0).expand(inp.size(0), -1, -1).cuda(),
             inp.shape,
             align_corners=False,
         )

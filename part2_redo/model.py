@@ -1,10 +1,104 @@
 import math
 import random
 
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
 from util.unet import UNet
+
+
+def augment3d(inp):
+    transform_t = torch.eye(4, dtype=torch.float32)
+    for i in range(3):
+        if True:  #'flip' in augmentation_dict:
+            if random.random() > 0.5:
+                transform_t[i, i] *= -1
+        if True:  #'offset' in augmentation_dict:
+            offset_float = 0.1
+            random_float = random.random() * 2 - 1
+            transform_t[3, i] = offset_float * random_float
+    if True:
+        angle_rad = random.random() * np.pi * 2
+        s = np.sin(angle_rad)
+        c = np.cos(angle_rad)
+
+        rotation_t = torch.tensor(
+            [
+                [c, -s, 0, 0],
+                [s, c, 0, 0],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1],
+            ],
+            dtype=torch.float32,
+        )
+
+        transform_t @= rotation_t
+    # print(inp.shape, transform_t[:3].unsqueeze(0).expand(inp.size(0), -1, -1).shape)
+    affine_t = torch.nn.functional.affine_grid(
+        transform_t[:3].unsqueeze(0).expand(inp.size(0), -1, -1),
+        # transform_t[:3].unsqueeze(0).expand(inp.size(0), -1, -1).cuda(),
+        inp.shape,
+        align_corners=False,
+    )
+
+    augmented_chunk = torch.nn.functional.grid_sample(
+        inp,
+        affine_t,
+        padding_mode="border",
+        align_corners=False,
+    )
+    if False:  #'noise' in augmentation_dict:
+        noise_t = torch.randn_like(augmented_chunk)
+        noise_t *= augmentation_dict["noise"]
+
+        augmented_chunk += noise_t
+    return augmented_chunk
+
+
+def augment3d_new(inp):
+    transform_t = torch.eye(4, dtype=torch.float32)
+    for i in range(3):
+        if True:
+            if random.random() > 0.5:
+                transform_t[i, i] *= -1
+        if True:
+            offset_float = 0.1
+            random_float = random.random() * 2 - 1
+            transform_t[3, i] = offset_float * random_float
+    if True:
+        angle_rad = random.random() * np.pi * 2
+        s = np.sin(angle_rad)
+        c = np.cos(angle_rad)
+        rotation_t = torch.tensor(
+            [
+                [c, -s, 0, 0],
+                [s, c, 0, 0],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1],
+            ],
+            dtype=torch.float32,
+        )
+        transform_t @= rotation_t
+
+    affine_t = torch.nn.functional.affine_grid(
+        transform_t[:3].unsqueeze(0).expand(inp.size(0), -1, -1),
+        # transform_t[:3].unsqueeze(0).expand(inp.size(0), -1, -1).cuda(),
+        inp.shape,
+        align_corners=False,
+    )
+    augmented_chunk = torch.nn.functional.grid_sample(
+        inp,
+        affine_t,
+        padding_mode="border",
+        align_corners=False,
+    )
+    if False:
+        noise_t = torch.randn_like(augmented_chunk)
+        noise_t *= 0.1
+        augmented_chunk += noise_t
+
+    return augmented_chunk
 
 
 class LunaBlock(nn.Module):
@@ -38,6 +132,7 @@ class LunaModel(nn.Module):
         self.block4 = LunaBlock(conv_channels * 4, conv_channels * 8)
         self.head_linear = nn.Linear(1152, 2)
         self.head_softmax = nn.Softmax(dim=1)
+        self._init_weights()
 
     def _init_weights(self):
         for m in self.modules():
@@ -72,8 +167,13 @@ class UNetWrapper(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        init_set = {nn.Conv2d, nn.Conv3d, nn.ConvTranspose2d,
-                    nn.ConvTranspose3d, nn.Linear,}
+        init_set = {
+            nn.Conv2d,
+            nn.Conv3d,
+            nn.ConvTranspose2d,
+            nn.ConvTranspose3d,
+            nn.Linear,
+        }
         for m in self.modules():
             if type(m) in init_set:
                 nn.init.kaiming_normal_(
@@ -136,7 +236,7 @@ class SegmentationAugmentation(nn.Module):
         for i in range(2):
             if self.flip:
                 if random.random() > 0.5:
-                    transform_t[i,i] *= -1
+                    transform_t[i, i] *= -1
             if self.offset:
                 offset_float = self.offset
                 random_float = random.random() * 2 - 1

@@ -4,7 +4,7 @@ from util.logconf import logging
 
 from torch.utils.data import DataLoader
 
-from part2_redo.dsets import LunaDataset
+from part2_redo.dsets import LunaDataset, get_ct_sample_size
 from part2_redo.my_utils import enumerate_with_estimate
 
 log = logging.getLogger(__name__)
@@ -51,5 +51,4 @@ class LunaPrepCacheApp:
 
 
 if __name__ == "__main__":
-    app = LunaPrepCacheApp()
-    app.main()
+    LunaPrepCacheApp().main()

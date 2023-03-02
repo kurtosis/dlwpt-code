@@ -19,7 +19,7 @@ from torch.utils.data import Dataset
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
-raw_cache = getCache("part2_ch13_dsets")
+raw_cache = getCache("redo_part2ch14")
 
 
 @functools.lru_cache(1)
@@ -194,8 +194,9 @@ class Ct:
             slice_list.append(slice(start_ndx, end_ndx))
 
         ct_chunk = self.hu_a[tuple(slice_list)]
-        pos_chunk = self.pos_mask[tuple(slice_list)]
-        return ct_chunk, pos_chunk, center_irc
+        return ct_chunk, center_irc
+        # pos_chunk = self.pos_mask[tuple(slice_list)]
+        # return ct_chunk, pos_chunk, center_irc
 
 
 @functools.lru_cache(1, typed=True)
@@ -204,16 +205,29 @@ def get_ct(seriesuid):
 
 
 @raw_cache.memoize(typed=True)
-def get_ct_raw_candidate(seriesuid, center_xyz, width_irc):
+def get_ct_raw_candidate_ch13(seriesuid, center_xyz, width_irc):
     ct = get_ct(seriesuid)
     ct_chunk, pos_chunk, center_irc = ct.get_raw_candidate(center_xyz, width_irc)
     return ct_chunk, pos_chunk, center_irc
 
 
 @raw_cache.memoize(typed=True)
-def get_ct_sample_size(seriesuid):
+def get_ct_raw_candidate(series_uid, center_xyz, width_irc):
+    ct = get_ct(series_uid)
+    ct_chunk, center_irc = ct.get_raw_candidate(center_xyz, width_irc)
+    return ct_chunk, center_irc
+
+
+@raw_cache.memoize(typed=True)
+def get_ct_sample_size_ch13(seriesuid):
     ct = Ct(seriesuid)
     return int(ct.hu_a.shape[0]), ct.pos_indexes
+
+
+@raw_cache.memoize(typed=True)
+def get_ct_sample_size(series_uid):
+    ct = Ct(series_uid, buildMasks_bool=False)
+    return len(ct.negative_indexes)
 
 
 def get_ct_augmented_candidate(
@@ -281,22 +295,32 @@ class LunaDataset(Dataset):
         augmentation_dict=None,
         seriesuid=None,
         sortby_str="random",
+        candidates=None,
     ):
         self.ratio_int = ratio_int
         self.augmentation_dict = augmentation_dict
-        self.candidates = copy.copy(get_candidate_df())
-        self.use_cache = True
+        if candidates is not None:
+            self.candidates = candidates
+            self.use_cache = False
+        else:
+            self.candidates = copy.copy(get_candidate_df())
+            self.use_cache = True
 
         if seriesuid:
-            self.candidates = self.candidates[self.candidates.seriesuid == seriesuid]
-        elif is_val_set_bool:
+            self.series_list = [seriesuid]
+        else:
+            self.series_list = sorted(self.candidates["seriesuid"].unique().tolist())
+
+        if is_val_set_bool:
             assert val_stride > 0, val_stride
-            self.candidates = self.candidates[::val_stride]
-            assert not self.candidates.empty
+            self.series_list = self.series_list[::val_stride]
+            assert self.series_list
         elif val_stride > 0:
-            self.candidates = self.candidates[self.candidates.index % val_stride != 0]
-            assert not self.candidates.empty
-        self.candidates.reset_index(inplace=True, drop=True)
+            del self.series_list[::val_stride]
+            assert self.series_list
+
+        series_set = set(self.series_list)
+        self.candidates = self.candidates[self.candidates.seriesuid.isin(series_set)]
 
         if sortby_str == "random":
             self.candidates = self.candidates.sample(frac=1).reset_index(drop=True)
@@ -309,15 +333,23 @@ class LunaDataset(Dataset):
         else:
             raise Exception("Unknown sort: " + repr(sortby_str))
 
-        self.neg_df = copy.copy(
-            self.candidates[self.candidates.is_nodule_bool == False]
+        self.neg_df = self.candidates[
+            self.candidates["is_nodule_bool"] == False
+        ].reset_index(drop=True)
+        self.pos_df = self.candidates[
+            self.candidates["is_nodule_bool"] == True
+        ].reset_index(drop=True)
+        self.ben_df = self.pos_df[self.pos_df["mal_bool"] == False].reset_index(
+            drop=True
         )
-        self.neg_df.reset_index(drop=True, inplace=True)
-        self.pos_df = copy.copy(self.candidates[self.candidates.is_nodule_bool == True])
-        self.pos_df.reset_index(drop=True, inplace=True)
+        self.mal_df = self.pos_df[self.pos_df["mal_bool"] == True].reset_index(
+            drop=True
+        )
 
         log.info(
-            f"{self!r}: {len(self.candidates)} {'validation' if is_val_set_bool else 'training'} samples"
+            f"{self!r}: {len(self.candidates)} {'validation' if is_val_set_bool else 'training'} samples "
+            f"{len(self.neg_df)} neg, {len(self.pos_df)} pos, "
+            f"{self.ratio_int if self.ratio_int else 'unbalanced'} ratio"
         )
 
     def shuffle_samples(self):
@@ -344,6 +376,54 @@ class LunaDataset(Dataset):
         else:
             cand = self.candidates.iloc[ndx]
 
+        return self.sample_from_cand(cand, cand.is_nodule_bool)
+
+        # width_irc = (32, 48, 48)
+        #
+        # center_xyz = (
+        #     cand.coordX,
+        #     cand.coordY,
+        #     cand.coordZ,
+        # )
+        #
+        # if self.augmentation_dict:
+        #     candidate_t, center_irc = get_ct_augmented_candidate(
+        #         self.augmentation_dict,
+        #         cand.seriesuid,
+        #         center_xyz,
+        #         width_irc,
+        #         self.use_cache,
+        #     )
+        # elif self.use_cache:
+        #     candidate_a, pos_a, center_irc = get_ct_raw_candidate(
+        #         cand.seriesuid,
+        #         center_xyz,
+        #         width_irc,
+        #     )
+        #     candidate_t = torch.from_numpy(candidate_a).to(torch.float32)
+        #     candidate_t = candidate_t.unsqueeze(0)
+        # else:
+        #     ct = get_ct(cand.seriesuid)
+        #     candidate_a, pos_a, center_irc = ct.get_raw_candidate(
+        #         center_xyz,
+        #         width_irc,
+        #     )
+        #     candidate_t = torch.from_numpy(candidate_a).to(torch.float32)
+        #     candidate_t = candidate_t.unsqueeze(0)
+        #
+        # pos_t = torch.tensor(
+        #     [not cand.is_nodule_bool, cand.is_nodule_bool],
+        #     dtype=torch.long,
+        # )
+        #
+        # return (
+        #     candidate_t,
+        #     pos_t,
+        #     cand.seriesuid,
+        #     torch.tensor(center_irc),
+        # )
+
+    def sample_from_cand(self, cand, label_bool):
         width_irc = (32, 48, 48)
 
         center_xyz = (
@@ -361,7 +441,8 @@ class LunaDataset(Dataset):
                 self.use_cache,
             )
         elif self.use_cache:
-            candidate_a, pos_a, center_irc = get_ct_raw_candidate(
+            # candidate_a, pos_a, center_irc = get_ct_raw_candidate(
+            candidate_a, center_irc = get_ct_raw_candidate(
                 cand.seriesuid,
                 center_xyz,
                 width_irc,
@@ -370,24 +451,52 @@ class LunaDataset(Dataset):
             candidate_t = candidate_t.unsqueeze(0)
         else:
             ct = get_ct(cand.seriesuid)
-            candidate_a, pos_a, center_irc = ct.get_raw_candidate(
+            # candidate_a, pos_a, center_irc = ct.get_raw_candidate(
+            candidate_a, center_irc = ct.get_raw_candidate(
                 center_xyz,
                 width_irc,
             )
             candidate_t = torch.from_numpy(candidate_a).to(torch.float32)
             candidate_t = candidate_t.unsqueeze(0)
 
-        pos_t = torch.tensor(
-            [not cand.is_nodule_bool, cand.is_nodule_bool],
-            dtype=torch.long,
-        )
+        label_t = torch.tensor([False, False], dtype=torch.long)
+        if not label_bool:
+            label_t[0] = True
+            index_t = 0
+        else:
+            label_t[1] = True
+            index_t = 1
 
         return (
             candidate_t,
-            pos_t,
+            label_t,
+            index_t,
             cand.seriesuid,
             torch.tensor(center_irc),
         )
+
+
+class MalignantLunaDataset(LunaDataset):
+    def __len__(self):
+        if self.ratio_int:
+            return 20000
+        else:
+            return len(self.ben_df) + len(self.mal_df)
+
+    def __getitem__(self, ndx):
+        if self.ratio_int:
+            if ndx % 2 != 0:
+                cand = self.mal_df.iloc[(ndx // 2) % len(self.mal_df)]
+            elif ndx % 4 == 0:
+                cand = self.ben_df.iloc[(ndx // 4) % len(self.ben_df)]
+            else:
+                cand = self.neg_df.iloc[(ndx // 4) % len(self.neg_df)]
+        else:
+            if ndx >= len(self.ben_df):
+                cand = self.mal_df.iloc[ndx - len(self.ben_df)]
+            else:
+                cand = self.ben_df.iloc[ndx]
+        return self.sample_from_cand(cand, cand.mal_bool)
 
 
 class PrepcacheLunaDataset(Dataset):
